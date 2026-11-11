@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { api, cover, fmt, fmtTime, isMobile, logLine, mediaUrl } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
@@ -13,7 +14,7 @@ import { setBackHandler } from "../back";
 import { copyText } from "../clipboard";
 import { tracePlayback } from "../playbackDiagnostics";
 import {
-  IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IFileText, IHeart, IHeartF,
+  IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IDownload, IExpand, IFileText, IHeart, IHeartF,
   ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVertSwap, IVol, IVolMute,
 } from "../icons";
 
@@ -95,6 +96,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   }, [paused]);
   const [fullscreen, setFullscreen] = useState(false);
   const [heartBurst, setHeartBurst] = useState(0);
+  /* 下载：后台任务；本实例启动的任务 id 记在这里，按钮上只显示它的进度 */
+  const [dl, setDl] = useState<{ id: string; done: number; total: number } | null>(null);
   /* —— 移动端手势 —— */
   const [holdSpeed, setHoldSpeed] = useState(false);
   const [speedLock, setSpeedLock] = useState(false);
@@ -198,6 +201,27 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const shareLink = () => {
     const u = kind === "post" ? (posts[curId]?.video_url || meta.title) : `https://huangguoai.com/video/${curId}/`;
     copyText(u).then(() => toast("链接已复制", "ok")).catch(() => toast("复制失败", "info"));
+  };
+
+  /* 下载：Rust 后台任务，进度/完成走事件 */
+  useEffect(() => {
+    const un1 = listen<{ id: string; done: number; total: number }>("hg-download-progress", (e) => {
+      setDl((cur) => (cur && cur.id === e.payload.id ? e.payload : cur));
+    });
+    const un2 = listen<{ id: string }>("hg-download-done", (e) => {
+      setDl((cur) => (cur && cur.id === e.payload.id ? null : cur));
+    });
+    return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
+  }, []);
+
+  const onDownload = () => {
+    if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
+    if (!playUrl) { toast("播放地址还没就绪，稍候再试", "info"); return; }
+    const base = meta.title || (kind === "post" ? `吃瓜-${curId}` : `视频-${curId}`);
+    const name = kind === "video" && episodes.length > 1 ? `${base} 第${curEp}集` : base;
+    api.downloadStart(playUrl, name)
+      .then((id) => { setDl({ id, done: 0, total: 1 }); toast("已开始下载，可在 设置-下载管理 查看", "ok"); })
+      .catch((e) => toast((e as Error).message || "下载失败", "info"));
   };
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
@@ -1002,6 +1026,10 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     <IExpand size={26} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">全屏</span>
                   </button>
+                  <button onClick={onDownload} className="flex flex-col items-center gap-1 pressable" aria-label="下载">
+                    <IDownload size={25} className="hg-ink hg-ov-shadow" />
+                    <span className="text-[10.5px] hg-ink-2 hg-ov-shadow tabular-nums">{dl ? `${dl.done}/${dl.total}` : "下载"}</span>
+                  </button>
                   <button onClick={shareLink} className="flex flex-col items-center gap-1 pressable" aria-label="分享">
                     <ILink size={25} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">分享</span>
@@ -1047,6 +1075,11 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     </button>
                   </>
                 )}
+
+                <button onClick={onDownload} className="flex flex-col items-center gap-1 pressable">
+                  <IDownload size={25} className="text-white tsh" />
+                  <span className="text-[10.5px] text-white/90 tabular-nums">{dl ? `${dl.done}/${dl.total}` : "下载"}</span>
+                </button>
 
                 <button onClick={shareLink} className="flex flex-col items-center gap-1 pressable">
                   <ILink size={25} className="text-white tsh" />

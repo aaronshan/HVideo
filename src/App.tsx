@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
 import { isMobile, selfTest } from "./api";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { runBack } from "./back";
 import Home from "./pages/Home";
 import Search, { RankPage } from "./pages/Search";
@@ -265,10 +266,20 @@ function MobileShell() {
 
 /* ============ 入口 ============ */
 export default function App() {
-  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs } = useStore();
+  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, toast } = useStore();
   useEffect(() => {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);
+
+  /* 后台下载完成通知：无论停留在哪个页面都提示（取消不提示） */
+  useEffect(() => {
+    const un = listen<{ name: string; ok: boolean; path?: string | null; err?: string | null }>("hg-download-done", (e) => {
+      const p = e.payload;
+      if (p.ok) toast(`下载完成：${p.name}`, "ok");
+      else if (p.err && p.err !== "已取消") toast(`下载失败：${p.err}`, "info");
+    });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [toast]);
 
   /* iOS：长按快进会触发 WKWebView 系统文本选择放大镜（loupe），纯 CSS 挡不住。
      原生层已默认关闭文本交互（isTextInteractionEnabled=false）；这里在用户触碰输入框时

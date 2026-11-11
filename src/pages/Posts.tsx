@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, cover, fmt, isMobile } from "../api";
 import type { Post, PostCategory } from "../types";
 import { useStore } from "../store";
 import { copyText } from "../clipboard";
 import { Empty, Img } from "../components/ui";
 import Player from "../components/Player";
-import { IBack, IFireF, IPlayF, ISearch } from "../icons";
+import { IBack, IDownload, IFireF, IPlayF, ISearch } from "../icons";
 import { handleArticleClick, sanitizeHtml } from "../html";
 import { InplaceSearch } from "../components/InplaceSearch";
 
@@ -129,6 +130,8 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
   const [segs, setSegs] = useState<string[]>([]);
   const [seg, setSeg] = useState(0);
   const [resolving, setResolving] = useState(false);
+  /* 下载：后台任务；本实例启动的任务 id 记在这里，按钮上只显示它的进度 */
+  const [dl, setDl] = useState<{ id: string; done: number; total: number } | null>(null);
   const content = post?.content || "";
   const src = segs[seg] || "";
   const safeHtml = useMemo(() => sanitizeHtml(content), [content, strictSecurity]);
@@ -163,11 +166,37 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
     return () => { alive = false; };
   }, [id]);
 
+  useEffect(() => {
+    const un1 = listen<{ id: string; done: number; total: number }>("hg-download-progress", (e) => {
+      setDl((cur) => (cur && cur.id === e.payload.id ? e.payload : cur));
+    });
+    const un2 = listen<{ id: string }>("hg-download-done", (e) => {
+      setDl((cur) => (cur && cur.id === e.payload.id ? null : cur));
+    });
+    return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
+  }, []);
+
+  const onDownload = () => {
+    if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
+    if (!src) { toast(resolving ? "视频地址解析中…" : "该帖子没有视频", "info"); return; }
+    const base = post?.title || `吃瓜-${id}`;
+    const name = segs.length > 1 ? `${base} 第${seg + 1}段` : base;
+    api.downloadStart(src, name)
+      .then((tid) => { setDl({ id: tid, done: 0, total: 1 }); toast("已开始下载，可在 设置-下载管理 查看", "ok"); })
+      .catch((e) => toast((e as Error).message || "下载失败", "info"));
+  };
+
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
       <div className="shrink-0 flex items-center gap-2 px-2 bg-s1" style={{ paddingTop: isMobile ? "var(--sat, 0px)" : 0, height: isMobile ? "calc(44px + var(--sat, 0px))" : 44 }}>
         <button onClick={onBack} className="w-9 h-9 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={19} /></button>
         <span className="text-[13.5px] font-semibold text-on">吃瓜详情</span>
+        {segs.length > 0 && (
+          <button onClick={onDownload} aria-label="下载视频"
+            className="ml-auto flex items-center gap-1 h-8 px-3 rounded-full bg-s3 text-[11.5px] font-semibold text-on pressable">
+            <IDownload size={14} />{dl ? `${dl.done}/${dl.total}` : "下载"}
+          </button>
+        )}
       </div>
 
       <div className="flex-1 scroll-y pb-8">

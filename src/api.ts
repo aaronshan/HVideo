@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { tracePlayback } from "./playbackDiagnostics";
 import type {
-  CommentPage, Detail, HotWord, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
+  CommentPage, Detail, DownloadFile, DownloadTask, HotWord, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
 } from "./types";
 
 /* ── 运行环境 ───────────────────────────────────────────── */
@@ -196,6 +196,13 @@ export const api = {
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
   openUrl: (url: string) => call<void>("open_url", { url }),
+  /** 启动后台下载，立即返回任务 id；进度/完成走 hg-download-progress / hg-download-done 事件 */
+  downloadStart: (url: string, name: string) => call<string>("download_start", { url, name }),
+  downloadCancel: (id: string) => call<void>("download_cancel", { id }),
+  downloadTasks: () => call<DownloadTask[]>("download_tasks"),
+  downloadFiles: () => call<DownloadFile[]>("download_files"),
+  downloadDeleteFile: (name: string) => call<void>("download_delete_file", { name }),
+  downloadOpenDir: () => call<void>("download_open_dir"),
 };
 
 /* ── 更新检查 ───────────────────────────────────────────── */

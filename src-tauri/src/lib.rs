@@ -1,4 +1,5 @@
 mod api;
+mod download;
 #[cfg(target_os = "ios")]
 mod ios_layout;
 mod lines;
@@ -187,6 +188,12 @@ pub fn run() {
             api::line_health,
             api::check_update,
             api::open_url,
+            download::download_start,
+            download::download_cancel,
+            download::download_tasks,
+            download::download_files,
+            download::download_delete_file,
+            download::download_open_dir,
             api::set_orientation,
             api::set_text_interaction,
             api::api_login,

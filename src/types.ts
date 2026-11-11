@@ -185,3 +185,22 @@ export type User = {
     like_video_episodes: { video_id: number; ep: number }[];
   };
 };
+
+/* ── 下载 ── */
+export type DownloadTask = {
+  id: string;
+  name: string;
+  done: number;
+  total: number;
+  /** running / done / failed / cancelled */
+  status: string;
+  path?: string | null;
+  err?: string | null;
+};
+
+export type DownloadFile = {
+  name: string;
+  size: number;
+  /** 修改时间（Unix 秒） */
+  mtime: number;
+};
