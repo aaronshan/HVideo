@@ -25,7 +25,10 @@ const FINISHED_KEEP: usize = 50;
 #[derive(Clone, serde::Serialize)]
 pub struct TaskInfo {
     id: String,
+    /// 展示名（剧名 或 剧名+集数）
     name: String,
+    /// 归组键：剧名（单集剧/吃瓜帖 = 剧名）。管理页按它聚合。
+    group: String,
     done: usize,
     total: usize,
     /// running / done / failed / cancelled
@@ -270,6 +273,7 @@ fn unique_path(dir: &std::path::Path, name: &str, ext: &str) -> std::path::PathB
 
 /// 实际下载。`on_progress(done,total)` 每写完一个分片回调；
 /// `on_file(path)` 在输出文件创建时回调（供取消清理）。
+/// `dir` 已是该剧的子目录（`HGhub/<剧名>/`）。
 async fn perform(
     dir: &std::path::Path,
     url: &str,
@@ -277,6 +281,7 @@ async fn perform(
     on_progress: impl Fn(usize, usize),
     on_file: impl Fn(String),
 ) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建下载目录失败: {e}"))?;
     /* 非 HLS（直连 mp4 等）：整个拉下来按扩展名落盘 */
     if !url.to_ascii_lowercase().split('?').next().unwrap_or("").ends_with(".m3u8") {
         on_progress(0, 1);
@@ -387,13 +392,21 @@ async fn download_segments(
 /* ───────────────────────── 命令 ───────────────────────── */
 
 /// 启动后台下载，立即返回任务 id；进度/完成走事件。
+/// `group` 为剧名：文件落到 `HGhub/<剧名>/` 下；`name` 是完整展示名（含集数）。
 #[tauri::command]
-pub async fn download_start(app: tauri::AppHandle, url: String, name: String) -> Result<String, String> {
+pub async fn download_start(
+    app: tauri::AppHandle,
+    url: String,
+    name: String,
+    group: Option<String>,
+) -> Result<String, String> {
     let dir = download_dir(&app)?;
+    let group = group.unwrap_or_else(|| name.clone());
     let id = format!("dl-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
     TASKS.lock().unwrap().push(TaskInfo {
         id: id.clone(),
         name: name.clone(),
+        group: sanitize_name(&group),
         done: 0,
         total: 0,
         status: "running".into(),
@@ -402,6 +415,7 @@ pub async fn download_start(app: tauri::AppHandle, url: String, name: String) ->
     });
 
     let task_id = id.clone();
+    let group_dir = dir.join(sanitize_name(&group));
     let handle = tauri::async_runtime::spawn(async move {
         let emit_progress = |done: usize, total: usize| {
             task_update(&task_id, |t| { t.done = done; t.total = total; });
@@ -409,7 +423,7 @@ pub async fn download_start(app: tauri::AppHandle, url: String, name: String) ->
         };
         let on_file = |path: String| task_update(&task_id, |t| t.path = Some(path));
 
-        let result = perform(&dir, &url, &name, emit_progress, on_file).await;
+        let result = perform(&group_dir, &url, &name, emit_progress, on_file).await;
         HANDLES.lock().unwrap().remove(&task_id);
 
         let (ok, path, err) = match result {
@@ -430,6 +444,7 @@ pub async fn download_start(app: tauri::AppHandle, url: String, name: String) ->
         let _ = app.emit("hg-download-done", json!({
             "id": task_id,
             "name": info.as_ref().map(|t| t.name.clone()).unwrap_or_default(),
+            "group": info.as_ref().map(|t| t.group.clone()).unwrap_or_default(),
             "ok": ok,
             "path": path,
             "err": err,
@@ -454,7 +469,7 @@ pub async fn download_cancel(app: tauri::AppHandle, id: String) -> Result<(), St
         let _ = std::fs::remove_file(p);
     }
     let _ = app.emit("hg-download-done", json!({
-        "id": id, "name": info.name, "ok": false, "path": null, "err": "已取消",
+        "id": id, "name": info.name, "group": info.group, "ok": false, "path": null, "err": "已取消",
     }));
     Ok(())
 }
@@ -467,13 +482,15 @@ pub async fn download_tasks() -> Result<Vec<TaskInfo>, String> {
 
 #[derive(Clone, serde::Serialize)]
 pub struct FileInfo {
+    /// 相对下载根的路径（剧子目录下则含目录名）
     name: String,
     size: u64,
     /// 修改时间（Unix 秒）
     mtime: u64,
 }
 
-/// 已下载文件列表（新的在前）。
+/// 已下载文件列表（新的在前）：根目录平铺文件 + 各剧子目录里的集，
+/// 按 `HGhub/<剧名>/` 组织。
 #[tauri::command]
 pub async fn download_files(app: tauri::AppHandle) -> Result<Vec<FileInfo>, String> {
     let dir = download_dir(&app)?;
@@ -481,29 +498,37 @@ pub async fn download_files(app: tauri::AppHandle) -> Result<Vec<FileInfo>, Stri
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取下载目录失败: {e}"))?;
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if meta.is_file() {
+            let mtime = file_mtime(&meta);
+            out.push(FileInfo { name: file_name, size: meta.len(), mtime });
+        } else if meta.is_dir() {
+            // 剧目录：读它下面的每一集
+            let Ok(subs) = std::fs::read_dir(entry.path()) else { continue };
+            for sub in subs.flatten() {
+                let Ok(m) = sub.metadata() else { continue };
+                if !m.is_file() { continue; }
+                let n = sub.file_name().to_string_lossy().to_string();
+                out.push(FileInfo { name: format!("{file_name}/{n}"), size: m.len(), mtime: file_mtime(&m) });
+            }
         }
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        out.push(FileInfo {
-            name: entry.file_name().to_string_lossy().to_string(),
-            size: meta.len(),
-            mtime,
-        });
     }
     out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     Ok(out)
 }
 
-/// 删除已下载文件（只允许下载目录内的文件名）。
+fn file_mtime(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 删除已下载文件（只允许下载目录内、剧子目录一层以内的相对路径）。
 #[tauri::command]
 pub async fn download_delete_file(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    if name.contains('/') || name.contains('\\') || name.trim_matches('.').is_empty() {
+    if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
         return Err("非法文件名".into());
     }
     let path = download_dir(&app)?.join(&name);
@@ -518,6 +543,19 @@ pub async fn download_open_dir(app: tauri::AppHandle) -> Result<(), String> {
     app.opener()
         .open_path(dir.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// 删除整部剧的下载目录（name 是剧目录名，不带路径分隔）。
+#[tauri::command]
+pub async fn download_delete_group(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.trim_matches('.').is_empty() {
+        return Err("非法目录名".into());
+    }
+    let path = download_dir(&app)?.join(&name);
+    if !path.is_dir() {
+        return Err("目录不存在".into());
+    }
+    std::fs::remove_dir_all(&path).map_err(|e| format!("删除失败: {e}"))
 }
 
 #[cfg(test)]

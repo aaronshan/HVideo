@@ -33,7 +33,7 @@ type Props = {
   startTime?: number;
 };
 
-const RATES = [1, 1.25, 1.5, 2];
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
 const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
@@ -60,6 +60,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [paused, setPaused] = useState(false);
   const [controlsLocked, setControlsLocked] = useState(false);
   const [rate, setRate] = useState(1);
+  /* 全屏模式下的倍速菜单（更多档位：0.5x ~ 3x） */
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [err, setErr] = useState("");
   const [panel, setPanel] = useState<"episodes" | "comments" | "article" | "detail" | null>(null);
@@ -214,13 +216,41 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
   }, []);
 
+  /* 下载整部剧：顺序为每一集建任务（Rust 侧逐个排队执行），进度 = 完成集数/总集数 */
+  const downloadAllEpisodes = async () => {
+    if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
+    if (kind !== "video" || episodes.length === 0) return;
+    const base = meta.title || `视频-${curId}`;
+    let started = 0;
+    /* 取地址：先用已缓存的（预热），没有的现场取 */
+    for (const ep of episodes) {
+      const k = `${curId}:${ep.ep_num}`;
+      let u = playUrls[k] || "";
+      if (!u) {
+        try {
+          const info = await api.play(curId, ep.ep_num);
+          u = info?.streams?.main || info?.video_url || "";
+          if (u) setPlayUrls((m) => ({ ...m, [k]: u }));
+        } catch { /* 单集取失败：跳过 */ }
+      }
+      if (!u) continue;
+      try {
+        await api.downloadStart(u, `${base} 第${ep.ep_num}集`, base);
+        started += 1;
+      } catch { /* 单集失败不阻断其它集 */ }
+    }
+    if (started > 0) toast(`已开始下载《${base}》${started} 集，在 我的-下载 查看`, "ok");
+    else toast("没有可下载的集", "info");
+  };
+
   const onDownload = () => {
     if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
     if (!playUrl) { toast("播放地址还没就绪，稍候再试", "info"); return; }
     const base = meta.title || (kind === "post" ? `吃瓜-${curId}` : `视频-${curId}`);
-    const name = kind === "video" && episodes.length > 1 ? `${base} 第${curEp}集` : base;
-    api.downloadStart(playUrl, name)
-      .then((id) => { setDl({ id, done: 0, total: 1 }); toast("已开始下载，可在 设置-下载管理 查看", "ok"); })
+    /* 多集剧点按钮 = 下载整部剧；单集/吃瓜 = 只下当前内容 */
+    if (kind === "video" && episodes.length > 1) { void downloadAllEpisodes(); return; }
+    api.downloadStart(playUrl, base, base)
+      .then((id) => { setDl({ id, done: 0, total: 1 }); toast("已开始下载，可在 我的-下载 查看", "ok"); })
       .catch((e) => toast((e as Error).message || "下载失败", "info"));
   };
 
@@ -455,6 +485,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     return () => window.removeEventListener("keydown", fn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, controlsLocked, panel, time, index, stepDir]);
+
+  /* 安卓返回键：倍速菜单 → 面板 → （上层处理） */
+  useEffect(() => {
+    if (!speedMenuOpen) return undefined;
+    setBackHandler(() => { setSpeedMenuOpen(false); return true; });
+    return () => setBackHandler(null);
+  }, [speedMenuOpen]);
 
   /* 安卓返回键：面板打开时先关面板 */
   useEffect(() => {
@@ -1229,18 +1266,29 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         />
       )}
 
-      {/* 移动端：倍速状态 / 锁定提示 */}
-      {!isDesktop && (holdSpeed || speedLock || rate !== 1) && (!fs || !idle) && (
+      {/* 移动端：倍速状态 / 锁定提示（点按弹倍速菜单，双倍速档位） */}
+      {!isDesktop && (holdSpeed || speedLock || rate !== 1 || speedMenuOpen) && (!fs || !idle) && (
         <button
           onClick={() => {
             if (speedLock) { setSpeedLock(false); toast("已解除倍速锁定", "info"); }
-            else if (rate !== 1 && !holdSpeed) setRate(1);
+            else setSpeedMenuOpen((v) => !v);
           }}
           className={`absolute left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 px-3.5 h-8 rounded-full backdrop-blur-md text-[12px] font-bold elev-2 pressable ${speedLock ? "bg-primary text-on-primary" : "hg-chip hg-gold"}`}
           style={{ top: "calc(var(--sat, 0px) + 54px)" }}>
           <IBoltF size={13} />
           {effRate}x {speedLock ? "已锁定 · 点按解除" : holdSpeed ? "倍速中 · 松开恢复" : "倍速"}
         </button>
+      )}
+      {!isDesktop && !fs && speedMenuOpen && (
+        <div className="absolute z-50 left-1/2 -translate-x-1/2 flex flex-col rounded-xl backdrop-blur-md elev-2 overflow-hidden"
+          style={{ top: "calc(var(--sat, 0px) + 96px)", background: "rgba(12,15,22,.92)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.09)" }}>
+          {RATES.map((r) => (
+            <button key={r} onClick={() => { setRate(r); setSpeedMenuOpen(false); }}
+              className={`w-24 h-9 text-[12px] font-semibold pressable ${r === rate ? "bg-primary text-on-primary" : "hg-ink-2"}`}>
+              {r === 1 ? "正常" : `${r}x`}
+            </button>
+          ))}
+        </div>
       )}
       {!isDesktop && holdSpeed && (
         <div
@@ -1295,13 +1343,23 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
             <button
               onClick={() => {
                 if (speedLock) { setSpeedLock(false); return; }
-                const seq = [1, 1.25, 1.5, 2];
-                const i = seq.indexOf(rate);
-                setRate(seq[(i + 1) % seq.length]);
+                setSpeedMenuOpen(true);
               }}
               className={`ml-auto shrink-0 flex items-center gap-1 px-2.5 h-8 rounded-full text-[12px] font-bold pressable ${effRate !== 1 ? "bg-primary text-on-primary" : "hg-chip hg-ink-2"}`}>
               <IBoltF size={12} />{effRate}x
             </button>
+            {/* 全屏倍速菜单：长列表，纵向弹出 */}
+            {speedMenuOpen && (
+              <div className="absolute z-50 right-4 bottom-14 flex flex-col rounded-xl backdrop-blur-md elev-2 overflow-hidden"
+                style={{ background: "rgba(12,15,22,.92)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.09)" }}>
+                {RATES.map((r) => (
+                  <button key={r} onClick={() => { setRate(r); setSpeedMenuOpen(false); }}
+                    className={`w-20 h-9 text-[12px] font-semibold pressable ${r === rate ? "bg-primary text-on-primary" : "hg-ink-2"}`}>
+                    {r === 1 ? "正常" : `${r}x`}
+                  </button>
+                ))}
+              </div>
+            )}
             {curEp < episodes.length && (
               <button onClick={() => pickEp(curEp + 1)}
                 className="shrink-0 flex items-center gap-1 px-2.5 h-8 rounded-full text-[12px] font-semibold hg-chip hg-ink-2 pressable"

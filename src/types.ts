@@ -190,6 +190,8 @@ export type User = {
 export type DownloadTask = {
   id: string;
   name: string;
+  /** 归组键（剧名），管理页按剧聚合 */
+  group: string;
   done: number;
   total: number;
   /** running / done / failed / cancelled */

@@ -193,6 +193,7 @@ pub fn run() {
             download::download_tasks,
             download::download_files,
             download::download_delete_file,
+            download::download_delete_group,
             download::download_open_dir,
             api::set_orientation,
             api::set_text_interaction,

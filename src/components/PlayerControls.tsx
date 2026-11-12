@@ -88,7 +88,7 @@ export default function PlayerControls({
           {speedOpen && (
             <div className="player-speed-menu" role="menu">
               <span className="player-menu-title">播放速度</span>
-              {[0.5, 0.75, 1, 1.25, 1.5, 2].map((v) => (
+              {[0.5, 0.75, 1, 1.25, 1.5, 2, 3].map((v) => (
                 <button key={v} role="menuitemradio" aria-checked={rate === v} onClick={() => { onRate(v); setSpeedOpen(false); }}>
                   <span>{v === 1 ? "正常" : `${v}x`}</span>{rate === v && <ICheck size={14} />}
                 </button>

@@ -196,12 +196,14 @@ export const api = {
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
   openUrl: (url: string) => call<void>("open_url", { url }),
-  /** 启动后台下载，立即返回任务 id；进度/完成走 hg-download-progress / hg-download-done 事件 */
-  downloadStart: (url: string, name: string) => call<string>("download_start", { url, name }),
+  /** 启动后台下载，立即返回任务 id；进度/完成走 hg-download-progress / hg-download-done 事件。
+   *  group = 剧名：文件落到 下载目录/HGhub/<剧名>/ 下 */
+  downloadStart: (url: string, name: string, group?: string) => call<string>("download_start", { url, name, group: group ?? null }),
   downloadCancel: (id: string) => call<void>("download_cancel", { id }),
   downloadTasks: () => call<DownloadTask[]>("download_tasks"),
   downloadFiles: () => call<DownloadFile[]>("download_files"),
   downloadDeleteFile: (name: string) => call<void>("download_delete_file", { name }),
+  downloadDeleteGroup: (name: string) => call<void>("download_delete_group", { name }),
   downloadOpenDir: () => call<void>("download_open_dir"),
 };
 

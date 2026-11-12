@@ -31,6 +31,7 @@ export const IExpand = S(<><path d="M8.5 3.5H3.5v5" /><path d="M15.5 3.5h5v5" />
 export const ICompress = S(<><path d="M3.5 8.5h5v-5" /><path d="M20.5 8.5h-5v-5" /><path d="M3.5 15.5h5v5" /><path d="M20.5 15.5h-5v5" /></>);
 export const IBack = S(<path d="m14.5 5-7 7 7 7" strokeWidth={2.4} />);
 export const IChevR = S(<path d="m9.5 5 7 7-7 7" />);
+export const IChevD = S(<path d="m5 9.5 7 7 7-7" />);
 export const IPlayF = S(<path d="M7.5 4.3c0-1 1.1-1.6 2-1.1l11 6.7c.9.5.9 1.7 0 2.2l-11 6.7c-.9.5-2-.1-2-1.1Z" />, true);
 export const IPauseF = S(<><rect x="5.5" y="3.5" width="4.6" height="17" rx="1.6" /><rect x="13.9" y="3.5" width="4.6" height="17" rx="1.6" /></>, true);
 export const IPlus = S(<><path d="M12 5v14" /><path d="M5 12h14" /></>);

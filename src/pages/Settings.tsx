@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
-import DownloadsModal from "../components/DownloadsModal";
 import LinePicker from "../components/LinePicker";
 import { autoLineEnabled, pickLine, setAutoLine } from "../autoLine";
 import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, tracePlayback, usePlaybackLog } from "../playbackDiagnostics";
@@ -15,7 +14,6 @@ import { IBack, IBoltF, IBroom, IChevR, IDownload, IHeart, IInfo, ILink, ILockF,
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
   const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, preferHevc, setPreferHevc, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
   const [about, setAbout] = useState(false);
-  const [dlOpen, setDlOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [lineOpen, setLineOpen] = useState(false);
@@ -134,14 +132,13 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </Section>
 
           <Section title="本地数据">
-            <button onClick={() => setDlOpen(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+            <div className="flex items-center gap-3 px-3.5 py-3">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IDownload size={16} /></span>
               <div className="flex-1">
-                <div className="text-[12.5px] text-on">下载管理</div>
-                <div className="text-[10.5px] text-mut">查看下载任务 · 管理已下载文件</div>
+                <div className="text-[12.5px] text-on">下载内容</div>
+                <div className="text-[10.5px] text-mut">在「我的 · 我的下载」查看与管理（按剧分组）</div>
               </div>
-              <IChevR size={15} className="text-mut" />
-            </button>
+            </div>
             <div className="flex items-center gap-3 px-3.5 py-3">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IHeart size={16} /></span>
               <div className="flex-1">
@@ -294,8 +291,6 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
       </div>
 
       <LinePicker open={lineOpen} onClose={() => { setLineOpen(false); readLine(); }} />
-
-      <DownloadsModal open={dlOpen} onClose={() => setDlOpen(false)} />
 
       <Modal open={diagReport !== null} onClose={() => setDiagReport(null)} width={520}>
         <div className="p-5">
