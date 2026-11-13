@@ -311,6 +311,45 @@ pub fn clear_caches() {
 
 /* ───────────────────────── 协议响应 ───────────────────────── */
 
+/// 读本地已下载文件（`HGhub/<剧名>/<文件>`）。只放行下载目录内的相对路径，
+/// 并按扩展名给 MIME。读整包返回——播放器 seek 时 WebView 会带 Range 重来。
+pub fn load_local_file(app: Option<&tauri::AppHandle>, rel: &str) -> Response<Vec<u8>> {
+    let bad = respond(400, "text/plain", b"bad path".to_vec(), "no-store");
+    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') || rel.is_empty() {
+        return bad;
+    }
+    let Some(app) = app else { return bad };
+    let dir = match crate::download::download_root(app) {
+        Ok(d) => d,
+        Err(e) => return respond(500, "text/plain", e.into_bytes(), "no-store"),
+    };
+    let path = dir.join(rel);
+    // 规范化后必须还在下载目录里（防符号链接越界）
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(c) => c,
+        Err(_) => return respond(404, "text/plain", b"not found".to_vec(), "no-store"),
+    };
+    if !canonical.starts_with(&dir) || !canonical.is_file() {
+        return respond(404, "text/plain", b"not found".to_vec(), "no-store");
+    }
+    let ext = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ctype = match ext.as_str() {
+        "mp4" | "m4s" => "video/mp4",
+        "ts" => "video/mp2t",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        _ => "application/octet-stream",
+    };
+    match std::fs::read(&canonical) {
+        Ok(bytes) => respond(200, ctype, bytes, "public, max-age=86400"),
+        Err(e) => respond(500, "text/plain", e.to_string().into_bytes(), "no-store"),
+    }
+}
+
 fn respond(status: u16, ctype: &str, body: Vec<u8>, cache: &str) -> Response<Vec<u8>> {
     let len = body.len().to_string();
     Response::builder()
@@ -361,11 +400,34 @@ fn segment_response(
     )
 }
 
-/// 统一入口：`<LOCAL_ORIGIN>/img?u=` / `hls?u=` / `seg?u=`
+/// 统一入口：`<LOCAL_ORIGIN>/img?u=` / `hls?u=` / `seg?u=` / `file?u=<下载目录相对路径>`
 ///
 /// `origin` 是本平台自定义协议的完整基址，见 [`LOCAL_ORIGIN`]；用于改写 m3u8 里的
 /// 分片与 key 地址。正常情况下调用方直接传 [`LOCAL_ORIGIN`]。
-pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> {
+/// `/file` 是纯本地路由（读已下载文件），`app` 为 None 时返回 400。
+pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, origin: &str) -> Response<Vec<u8>> {
+    /* 本地文件路由不走 u= 的 URL 语义，单独解析 */
+    if path == "/file" {
+        let rel = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("u="))
+            .map(dec)
+            .unwrap_or_default();
+        if rel.is_empty() {
+            return respond(400, "text/plain", b"missing u".to_vec(), "no-store");
+        }
+        crate::playback_log::record(
+            "proxy.begin",
+            serde_json::json!({"route": "local_file", "resource": crate::playback_log::resource_id(&rel)}),
+        );
+        let response = load_local_file(app, &rel);
+        crate::playback_log::record(
+            "proxy.end",
+            serde_json::json!({"route": "local_file", "resource": crate::playback_log::resource_id(&rel), "status": response.status().as_u16(), "bytes": response.body().len()}),
+        );
+        return response;
+    }
+
     let target = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("u="))
@@ -503,7 +565,7 @@ mod tests {
             &text[..text.len().min(160)]
         );
         let q = format!("u={}", enc(&url));
-        let resp = handle("/hls", &q, LOCAL_ORIGIN).await;
+        let resp = handle(None, "/hls", &q, LOCAL_ORIGIN).await;
         let body = String::from_utf8_lossy(resp.body()).to_string();
         println!("proxied status={} len={}", resp.status(), body.len());
         assert!(body.contains("#EXTM3U"));
@@ -515,7 +577,7 @@ mod tests {
             .to_string();
         println!("seg line: {}", &seg_line[..seg_line.len().min(120)]);
         let seg_q = seg_line.split("?u=").nth(1).unwrap();
-        let seg = handle("/seg", &format!("u={seg_q}"), LOCAL_ORIGIN).await;
+        let seg = handle(None, "/seg", &format!("u={seg_q}"), LOCAL_ORIGIN).await;
         println!("segment status={} len={}", seg.status(), seg.body().len());
         assert_eq!(seg.status(), 200);
         assert!(seg.body().len() > 1000);

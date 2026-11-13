@@ -19,8 +19,8 @@ pub const PORT: u16 = 17650;
 pub const ORIGIN: &str = "http://127.0.0.1:17650";
 
 /// 在后台线程里起服务。绑定失败只记日志（播放会退回自定义协议，大概率失败）。
-pub fn start() {
-    std::thread::spawn(|| {
+pub fn start(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
         let listener = match TcpListener::bind(("127.0.0.1", PORT)) {
             Ok(listener) => listener,
             Err(err) => {
@@ -29,9 +29,11 @@ pub fn start() {
             }
         };
         eprintln!("[hg] 媒体代理就绪：{ORIGIN}");
+        let app = app;
         for stream in listener.incoming().flatten() {
+            let app = app.clone();
             std::thread::spawn(move || {
-                if let Err(err) = serve(stream) {
+                if let Err(err) = serve(app, stream) {
                     eprintln!("[hg] 媒体请求失败：{err}");
                 }
             });
@@ -39,7 +41,7 @@ pub fn start() {
     });
 }
 
-fn serve(mut stream: TcpStream) -> std::io::Result<()> {
+fn serve(app: tauri::AppHandle, mut stream: TcpStream) -> std::io::Result<()> {
     let timeout = Some(std::time::Duration::from_secs(30));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
@@ -69,7 +71,7 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
         None => (target, ""),
     };
 
-    let response = tauri::async_runtime::block_on(crate::media::handle(path, query, ORIGIN));
+    let response = tauri::async_runtime::block_on(crate::media::handle(Some(&app), path, query, ORIGIN));
     let (parts, body) = response.into_parts();
 
     let mut head = String::with_capacity(320);

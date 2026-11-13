@@ -197,11 +197,17 @@ export const api = {
   checkUpdate: () => call<UpdateInfo>("check_update"),
   openUrl: (url: string) => call<void>("open_url", { url }),
   /** 启动后台下载，立即返回任务 id；进度/完成走 hg-download-progress / hg-download-done 事件。
-   *  group = 剧名：文件落到 下载目录/HGhub/<剧名>/ 下 */
-  downloadStart: (url: string, name: string, group?: string) => call<string>("download_start", { url, name, group: group ?? null }),
+   *  group = 剧名：文件落到 下载目录/HGhub/<剧名>/ 下。
+   *  videoId/ep 写进该剧 index.json，播放页据此直接放本地文件 */
+  downloadStart: (url: string, name: string, group?: string, videoId?: number, ep?: number) =>
+    call<string>("download_start", { url, name, group: group ?? null, videoId: videoId ?? null, ep: ep ?? null }),
   downloadCancel: (id: string) => call<void>("download_cancel", { id }),
   downloadTasks: () => call<DownloadTask[]>("download_tasks"),
   downloadFiles: () => call<DownloadFile[]>("download_files"),
+  /** 查询某集是否已下载；命中返回本地协议地址（断网可播） */
+  downloadCheck: (videoId: number, ep: number) => call<string | null>("download_check", { videoId, ep }),
+  /** 下载库（磁盘）状态：按剧分组的本地文件列表，断网可用 */
+  downloadLibrary: () => call<{ groups: { group: string; episodes: { file: string; size: number; mtime: number; mime: string; local_url: string }[] }[] }>("download_library"),
   downloadDeleteFile: (name: string) => call<void>("download_delete_file", { name }),
   downloadDeleteGroup: (name: string) => call<void>("download_delete_group", { name }),
   downloadOpenDir: () => call<void>("download_open_dir"),

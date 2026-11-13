@@ -11,6 +11,7 @@ import Profile from "./pages/Profile";
 import SettingsPage from "./pages/Settings";
 import Feed from "./components/Feed";
 import { PostsPage, PostDetail } from "./pages/Posts";
+import { LocalVideoPage } from "./pages/LocalVideo";
 import { TopicsPage, TopicPage, TagsPage, TagPage } from "./pages/Discover";
 import { FollowingPage, UserPage } from "./pages/User";
 import LoginModal from "./components/LoginModal";
@@ -103,6 +104,9 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
         startEp={page.startEp} startTime={page.startTime}
         mode="context" active={top} bottomInset={bottomInset} onBack={onBack} />
     );
+  }
+  if (page.kind === "localvideo") {
+    return <LocalVideoPage title={page.title} url={page.url} name={page.name} onBack={onBack} />;
   }
   if (page.kind === "channel") return <ChannelPage cate={page.cate} name={page.name} onBack={onBack} wide={wide} />;
   if (page.kind === "ranks") return <RankPage onBack={onBack} wide={wide} />;

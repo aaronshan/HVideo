@@ -92,7 +92,7 @@ pub fn run() {
             // Linux 的 <video> 由 GStreamer 播放，它只认常规 HTTP scheme；
             // 这里起一个 loopback 代理，前端与 m3u8 改写都指向它（见 linux_http.rs）
             #[cfg(target_os = "linux")]
-            linux_http::start();
+            linux_http::start(app.handle().clone());
             // macOS 主窗口在此创建：先按系统红绿灯尺寸算出居中位置（见 macos_titlebar.rs）
             #[cfg(target_os = "macos")]
             macos_titlebar::create_main_window(app)?;
@@ -112,7 +112,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .register_asynchronous_uri_scheme_protocol("hg", |_app, request, responder| {
+        .register_asynchronous_uri_scheme_protocol("hg", |app, request, responder| {
             let request_origin = request
                 .headers()
                 .get("Origin")
@@ -153,8 +153,9 @@ pub fn run() {
             // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
             // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
+            let app = app.app_handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN).await;
+                let mut resp = media::handle(Some(&app), &path, &query, media::LOCAL_ORIGIN).await;
                 if let Some(origin) =
                     request_origin.and_then(|s| tauri::http::HeaderValue::from_str(&s).ok())
                 {
@@ -192,6 +193,8 @@ pub fn run() {
             download::download_cancel,
             download::download_tasks,
             download::download_files,
+            download::download_check,
+            download::download_library,
             download::download_delete_file,
             download::download_delete_group,
             download::download_open_dir,

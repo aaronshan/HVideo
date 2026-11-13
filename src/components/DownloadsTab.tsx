@@ -11,52 +11,38 @@ const fmtSize = (n: number) =>
     : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB`
       : `${Math.max(1, Math.ceil(n / 1024))} KB`;
 
-const fmtDate = (sec: number) => {
-  if (!sec) return "";
-  const d = new Date(sec * 1000);
-  const p = (v: number) => String(v).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-};
-
 const STATUS_TEXT: Record<string, string> = {
   running: "下载中",
-  done: "已完成",
   failed: "失败",
   cancelled: "已取消",
 };
 
-type Group = {
-  name: string;
-  tasks: DownloadTask[];
-  running: number;
-  done: number;
-  failed: number;
+type LibEpisode = { file: string; size: number; mtime: number; mime: string; local_url: string };
+type LibGroup = { group: string; episodes: LibEpisode[] };
+type Item = {
+  /** 集名（file 去扩展名） */
+  label: string;
+  file: string;
+  size: number;
+  localUrl: string;
+  /** 进行中任务（无文件） */
+  task?: DownloadTask;
 };
 
-const groupTasks = (tasks: DownloadTask[]): Group[] => {
-  const map = new Map<string, Group>();
-  for (const t of tasks) {
-    const key = t.group || t.name;
-    let g = map.get(key);
-    if (!g) { g = { name: key, tasks: [], running: 0, done: 0, failed: 0 }; map.set(key, g); }
-    g.tasks.push(t);
-    if (t.status === "running") g.running += 1;
-    else if (t.status === "done") g.done += 1;
-    else if (t.status === "failed") g.failed += 1;
-  }
-  /* 有进行中任务的剧排前面，其余按最近一次活动 */
-  return [...map.values()].sort((a, b) => (b.running > 0 ? 1 : 0) - (a.running > 0 ? 1 : 0));
-};
+const labelOf = (file: string) => file.replace(/\.(mp4|ts|m4s)$/i, "");
 
-/* 「我的」页的下载 tab：按剧分组。进行中显示每集进度（可取消），
-   已完成的剧可整剧删除（删目录）。数据变化由事件驱动。 */
+/* 「我的」页的下载 tab。数据源是磁盘（download_library，断网可用）：
+   已完成的集直接列文件、可点播（进 Feed 本地播放）；进行中/失败的任务
+   （内存表）叠在同剧分组下显示进度与取消。 */
 export function DownloadsTab() {
-  const { toast } = useStore();
+  const { toast, push } = useStore();
+  const [lib, setLib] = useState<LibGroup[]>([]);
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [refreshTick, setRefreshTick] = useState(0);
 
   const refresh = useCallback(() => {
+    api.downloadLibrary().then((r) => setLib(r?.groups || [])).catch(() => {});
     api.downloadTasks().then(setTasks).catch(() => {});
   }, []);
 
@@ -71,12 +57,31 @@ export function DownloadsTab() {
     return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
   }, []);
 
-  const groups = useMemo(() => groupTasks(tasks), [tasks]);
-  /* 新出现下载任务的剧自动展开 */
+  /* 合并视图：磁盘上的剧 + 只有任务还没落盘的剧 */
+  const groups = useMemo(() => {
+    type Merged = { name: string; items: Item[] };
+    const map = new Map<string, Merged>();
+    for (const g of lib) {
+      map.set(g.group, {
+        name: g.group,
+        items: g.episodes.map((e) => ({ label: labelOf(e.file), file: e.file, size: e.size, localUrl: e.local_url })),
+      });
+    }
+    for (const t of tasks) {
+      const key = t.group || t.name;
+      let g = map.get(key);
+      if (!g) { g = { name: key, items: [] }; map.set(key, g); }
+      if (t.status === "running" || t.status === "failed" || t.status === "cancelled") {
+        g.items.push({ label: labelOf(t.name), file: "", size: 0, localUrl: "", task: t });
+      }
+    }
+    return [...map.values()];
+  }, [lib, tasks]);
+
   useEffect(() => {
     setOpen((prev) => {
       const next = { ...prev };
-      for (const g of groups) if (g.running > 0 && next[g.name] === undefined) next[g.name] = true;
+      for (const g of groups) if (next[g.name] === undefined) next[g.name] = true;
       return next;
     });
   }, [groups]);
@@ -85,16 +90,16 @@ export function DownloadsTab() {
     api.downloadCancel(t.id).then(refresh).catch((e) => toast((e as Error).message || "取消失败", "info"));
   };
 
-  const deleteGroup = (g: Group) => {
-    api.downloadDeleteGroup(g.name)
-      .then(() => toast(`已删除《${g.name}》`, "ok"))
+  const deleteGroup = (name: string) => {
+    api.downloadDeleteGroup(name)
+      .then(() => { toast(`已删除《${name}》`, "ok"); refresh(); })
       .catch((e) => toast((e as Error).message || "删除失败", "info"));
   };
 
   if (!groups.length) {
     return (
       <Empty icon={<IDownload size={24} />} title="还没有下载内容"
-        sub="在播放页点下载，多集剧会自动下载整部" />
+        sub="在播放页点下载，多集剧会自动下载整部；断网也能在这里播放" />
     );
   }
 
@@ -106,10 +111,8 @@ export function DownloadsTab() {
       </button>
       {groups.map((g) => {
         const expanded = open[g.name] !== false; // 默认展开
-        const totalEps = g.tasks.length;
-        const pct = g.running > 0
-          ? Math.round((g.tasks.reduce((s, t) => s + Math.min(1, t.total > 0 ? t.done / t.total : 0), 0) / totalEps) * 100)
-          : 0;
+        const doneCount = g.items.filter((i) => !i.task).length;
+        const runningCount = g.items.filter((i) => i.task?.status === "running").length;
         return (
           <div key={g.name} className="rounded-(--r-md) bg-s2 overflow-hidden">
             <button onClick={() => setOpen((o) => ({ ...o, [g.name]: !expanded }))}
@@ -118,42 +121,65 @@ export function DownloadsTab() {
               <span className="flex-1 min-w-0">
                 <span className="block text-[12.5px] font-semibold text-on truncate">{g.name}</span>
                 <span className="block text-[10.5px] text-mut mt-0.5 tabular-nums">
-                  {g.running > 0
-                    ? `下载中 ${g.done}/${totalEps} 集 · ${pct}%`
-                    : g.failed > 0 ? `${g.done}/${totalEps} 集 · ${g.failed} 集失败`
-                      : g.done === totalEps ? `${totalEps} 集 · 已完成` : `${g.done}/${totalEps} 集`}
+                  {runningCount > 0 ? `下载中 · 已完成 ${doneCount} 集` : `${doneCount} 集 · 本地可播`}
                 </span>
-                {g.running > 0 && (
-                  <span className="block mt-1.5 h-[3px] rounded-full bg-s3 overflow-hidden">
-                    <span className="block h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
-                  </span>
-                )}
               </span>
               <IChevD size={14} className="text-mut shrink-0" style={{ transform: expanded ? "rotate(180deg)" : undefined, transition: "transform .2s" }} />
             </button>
 
             {expanded && (
               <div className="divide-y divide-s3 border-t border-s3">
-                {g.tasks.map((t) => (
-                  <div key={t.id} className="flex items-center gap-2 px-3.5 py-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[11.5px] text-on truncate">{t.name}</div>
-                      <div className="text-[10px] text-mut mt-0.5 tabular-nums">
-                        {t.status === "running" && t.total > 1 ? `${t.done}/${t.total} 分片 · ` : ""}
-                        {t.status === "failed" ? (t.err || "失败") : STATUS_TEXT[t.status] || t.status}
+                {g.items.map((it, i) => {
+                  const t = it.task;
+                  const pct = t && t.total > 0 ? Math.min(100, Math.round((t.done / t.total) * 100)) : 0;
+                  return (
+                    <div key={`${it.label}-${i}`} className="flex items-center gap-2 px-3.5 py-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11.5px] text-on truncate">{it.label}</div>
+                        <div className="text-[10px] text-mut mt-0.5 tabular-nums">
+                          {t
+                            ? t.status === "running"
+                              ? (t.total > 1 ? `${t.done}/${t.total} 分片 · ` : "") + `${pct}%`
+                              : t.status === "failed" ? (t.err || "失败") : STATUS_TEXT[t.status] || t.status
+                            : fmtSize(it.size)}
+                        </div>
+                        {t && t.status === "running" && (
+                          <div className="mt-1 h-[3px] rounded-full bg-s3 overflow-hidden">
+                            <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
+                          </div>
+                        )}
                       </div>
+                      {!t && (
+                        <button
+                          onClick={() => {
+                            /* 点播：进 Feed 的本地播放模式（videoIds 从 index.json 拿不到，
+                               用文件名解析不可靠——直接给 VideoSurface 一个本地地址的播放入口） */
+                            push({ kind: "localvideo", title: g.name, url: it.localUrl, name: it.label });
+                          }}
+                          className="shrink-0 h-6 px-2.5 rounded-full bg-primary text-[10.5px] font-semibold text-on-primary pressable">
+                          播放
+                        </button>
+                      )}
+                      {t && t.status === "running" && (
+                        <button onClick={() => cancel(t)} className="shrink-0 h-6 px-2 rounded-full bg-s3 text-[10.5px] text-on pressable">取消</button>
+                      )}
+                      {!t && (
+                        <button
+                          onClick={() => api.downloadDeleteFile(`${g.name}/${it.file}`)
+                            .then(() => { toast("已删除", "ok"); refresh(); })
+                            .catch((e) => toast((e as Error).message || "删除失败", "info"))}
+                          aria-label={`删除 ${it.label}`}
+                          className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-mut hover:text-danger hover:bg-s3 pressable">
+                          <ITrash size={13} />
+                        </button>
+                      )}
                     </div>
-                    {t.status === "running" && (
-                      <button onClick={() => cancel(t)} className="shrink-0 h-6 px-2 rounded-full bg-s3 text-[10.5px] text-on pressable">取消</button>
-                    )}
-                  </div>
-                ))}
-                {g.running === 0 && (
-                  <button onClick={() => deleteGroup(g)}
-                    className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-[11px] text-mut hover:text-danger pressable">
-                    <ITrash size={12} />删除整部剧（{totalEps} 个文件）
-                  </button>
-                )}
+                  );
+                })}
+                <button onClick={() => deleteGroup(g.name)}
+                  className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-[11px] text-mut hover:text-danger pressable">
+                  <ITrash size={12} />删除整部剧
+                </button>
               </div>
             )}
           </div>

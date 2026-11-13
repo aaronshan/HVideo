@@ -52,6 +52,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [cards, setCards] = useState<Record<number, VideoCard>>({});
   const [posts, setPosts] = useState<Record<number, Post>>({});
   const [related, setRelated] = useState<VideoCard[]>([]);
+  /* 已下载的集（playKey 集）：播放走本地文件，UI 标「已下载」 */
+  const [downloadedEps, setDownloadedEps] = useState<Set<string>>(() => new Set());
 
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -210,8 +212,11 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const un1 = listen<{ id: string; done: number; total: number }>("hg-download-progress", (e) => {
       setDl((cur) => (cur && cur.id === e.payload.id ? e.payload : cur));
     });
-    const un2 = listen<{ id: string }>("hg-download-done", (e) => {
-      setDl((cur) => (cur && cur.id === e.payload.id ? null : cur));
+    const un2 = listen<{ id: string }>("hg-download-done", () => {
+      setDl(null);
+      /* 下载完成后清掉全部网络地址缓存：切回这集时重走「本地优先」检查 */
+      setPlayUrls({});
+      setDownloadedEps(new Set());
     });
     return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
   }, []);
@@ -235,7 +240,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       }
       if (!u) continue;
       try {
-        await api.downloadStart(u, `${base} 第${ep.ep_num}集`, base);
+        await api.downloadStart(u, `${base} 第${ep.ep_num}集`, base, curId, ep.ep_num);
         started += 1;
       } catch { /* 单集失败不阻断其它集 */ }
     }
@@ -249,7 +254,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const base = meta.title || (kind === "post" ? `吃瓜-${curId}` : `视频-${curId}`);
     /* 多集剧点按钮 = 下载整部剧；单集/吃瓜 = 只下当前内容 */
     if (kind === "video" && episodes.length > 1) { void downloadAllEpisodes(); return; }
-    api.downloadStart(playUrl, base, base)
+    api.downloadStart(playUrl, base, base, kind === "video" ? curId : undefined, kind === "video" ? curEp : undefined)
       .then((id) => { setDl({ id, done: 0, total: 1 }); toast("已开始下载，可在 我的-下载 查看", "ok"); })
       .catch((e) => toast((e as Error).message || "下载失败", "info"));
   };
@@ -383,32 +388,47 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     if (!curId) return;
     if (playUrls[playKey]) return;
     let alive = true;
-    api.play(curId, curEp)
-      .then((info) => {
+    /* 本地优先：已下载的集直接放本地文件，不走网络（断网也能看） */
+    const local = kind === "video"
+      ? api.downloadCheck(curId, curEp).catch(() => null)
+      : Promise.resolve(null);
+    local
+      .then((localUrl) => {
         if (!alive) return;
-        const streamUrl = info?.streams?.main || info?.video_url;
-        const hevcStream = info?.streams?.hevc || info?.video_url_hevc || "";
-        // 接口本身成功但业务失败（status=0 / streams 为空）时不会进 call() 的 catch，
-        // 这里把原始 status/msg 落进 debug.log ——「暂无播放地址」的唯一现场证据。
-        // src 才是真正喂给播放器的值；video_url 是新接口不再返回的旧字段，别拿它判断成败。
-        const raw = info as unknown as Record<string, unknown>;
-        const streams = (raw.streams ?? {}) as Record<string, unknown>;
-        const kind = streams.main ? "main" : info?.video_url ? "video_url" : streams.hevc ? "hevc" : "-";
-        let host = "?";
-        try { host = new URL(streamUrl || "").host || "?"; } catch { /* 空地址或非 URL */ }
-        logLine(
-          `[play] id=${curId} ep=${curEp} src=${streamUrl ? "y" : "n"} kind=${kind} host=${host}` +
-          (streamUrl ? "" : ` status=${String(raw.status ?? "?")} msg=${String(raw.msg ?? "")}`),
-        );
-        // 「暂无播放地址」的现场：接口成功但没给地址时，status/msg 是唯一证据。
-        tracePlayback("play.resolve", {
-          video_id: curId, episode: curEp, resolved: !!streamUrl, kind, host,
-          status: raw.status ?? null, msg: String(raw.msg ?? "") || null,
-        });
-        if (!streamUrl) throw new Error("暂无播放地址");
-        setPlayUrls((m) => ({ ...m, [playKey]: streamUrl }));
-        if (hevcStream) setHevcUrls((m) => ({ ...m, [playKey]: hevcStream }));
-        addHistory(curId, curEp);
+        if (localUrl) {
+          tracePlayback("play.resolve", { video_id: curId, episode: curEp, resolved: true, kind: "local", host: "downloaded" });
+          setPlayUrls((m) => ({ ...m, [playKey]: localUrl }));
+          setDownloadedEps((s) => (s.has(playKey) ? s : new Set(s).add(playKey)));
+          addHistory(curId, curEp);
+          return;
+        }
+        return api.play(curId, curEp)
+          .then((info) => {
+            if (!alive) return;
+            const streamUrl = info?.streams?.main || info?.video_url;
+            const hevcStream = info?.streams?.hevc || info?.video_url_hevc || "";
+            // 接口本身成功但业务失败（status=0 / streams 为空）时不会进 call() 的 catch，
+            // 这里把原始 status/msg 落进 debug.log ——「暂无播放地址」的唯一现场证据。
+            // src 才是真正喂给播放器的值；video_url 是新接口不再返回的旧字段，别拿它判断成败。
+            const raw = info as unknown as Record<string, unknown>;
+            const streams = (raw.streams ?? {}) as Record<string, unknown>;
+            const kind = streams.main ? "main" : info?.video_url ? "video_url" : streams.hevc ? "hevc" : "-";
+            let host = "?";
+            try { host = new URL(streamUrl || "").host || "?"; } catch { /* 空地址或非 URL */ }
+            logLine(
+              `[play] id=${curId} ep=${curEp} src=${streamUrl ? "y" : "n"} kind=${kind} host=${host}` +
+              (streamUrl ? "" : ` status=${String(raw.status ?? "?")} msg=${String(raw.msg ?? "")}`),
+            );
+            // 「暂无播放地址」的现场：接口成功但没给地址时，status/msg 是唯一证据。
+            tracePlayback("play.resolve", {
+              video_id: curId, episode: curEp, resolved: !!streamUrl, kind, host,
+              status: raw.status ?? null, msg: String(raw.msg ?? "") || null,
+            });
+            if (!streamUrl) throw new Error("暂无播放地址");
+            setPlayUrls((m) => ({ ...m, [playKey]: streamUrl }));
+            if (hevcStream) setHevcUrls((m) => ({ ...m, [playKey]: hevcStream }));
+            addHistory(curId, curEp);
+          });
       })
       .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
     return () => { alive = false; };
@@ -1135,6 +1155,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                       style={{ background: "rgba(255,255,255,.16)" }}>
                       第 {curEp}/{episodes.length} 集
                     </span>
+                  )}
+                  {downloadedEps.has(playKey) && (
+                    <span className="shrink-0 px-1.5 py-px rounded-md text-[10px] font-bold bg-primary text-on-primary">已下载</span>
                   )}
                    {hevcUrl && (
                      <button type="button" aria-pressed={preferHevc}

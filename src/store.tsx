@@ -23,6 +23,7 @@ export type FeedContext = {
 
 export type Page =
   | FeedContext
+  | { kind: "localvideo"; key: string; title: string; url: string; name: string }
   | { kind: "channel"; key: string; cate: string; name: string }
   | { kind: "ranks"; key: string }
   | { kind: "settings"; key: string }
@@ -37,6 +38,7 @@ export type Page =
 
 export type PageInput =
   | { kind: "feed"; videoIds: number[]; index: number; title: string; source?: string; feedKind?: "video" | "post"; startEp?: number; startTime?: number }
+  | { kind: "localvideo"; title: string; url: string; name: string }
   | { kind: "channel"; cate: string; name: string }
   | { kind: "ranks" }
   | { kind: "settings" }

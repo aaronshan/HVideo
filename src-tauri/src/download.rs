@@ -9,6 +9,7 @@ use crate::net::fetch_bytes;
 use aes::cipher::{BlockDecrypt, KeyInit};
 use aes::Aes128;
 use once_cell::sync::Lazy;
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,6 +82,19 @@ fn download_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = base.join("HGhub");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建下载目录失败: {e}"))?;
     Ok(dir)
+}
+
+/// 下载根目录（`…/HGhub`），media 协议的 /file 路由用它定位本地文件。
+/// 已存在的目录直接返回，因此只读场景不会建目录。
+pub fn download_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let base = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|e| e.to_string())?;
+    let dir = base.join("HGhub");
+    if dir.is_dir() { Ok(dir) } else { Err("下载目录不存在".into()) }
 }
 
 /* ───────────────────────── HLS 解析 ───────────────────────── */
@@ -393,29 +407,50 @@ async fn download_segments(
 
 /// 启动后台下载，立即返回任务 id；进度/完成走事件。
 /// `group` 为剧名：文件落到 `HGhub/<剧名>/` 下；`name` 是完整展示名（含集数）。
+/// `video_id` / `ep` 写进剧目录的 index.json，播放页用它把「已下载」映射到本地文件。
 #[tauri::command]
 pub async fn download_start(
     app: tauri::AppHandle,
     url: String,
     name: String,
     group: Option<String>,
+    video_id: Option<i64>,
+    ep: Option<i64>,
 ) -> Result<String, String> {
     let dir = download_dir(&app)?;
     let group = group.unwrap_or_else(|| name.clone());
+    let group = sanitize_name(&group);
     let id = format!("dl-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    TASKS.lock().unwrap().push(TaskInfo {
-        id: id.clone(),
-        name: name.clone(),
-        group: sanitize_name(&group),
-        done: 0,
-        total: 0,
-        status: "running".into(),
-        path: None,
-        err: None,
-    });
+    /* 同一部剧同一集重试：覆盖掉旧的 failed/cancelled 记录，不新增垃圾条目 */
+    {
+        let mut tasks = TASKS.lock().unwrap();
+        tasks.retain(|t| !(t.group == group && t.name == name && t.status != "running" && t.id != id));
+        tasks.push(TaskInfo {
+            id: id.clone(),
+            name: name.clone(),
+            group: group.clone(),
+            done: 0,
+            total: 0,
+            status: "running".into(),
+            path: None,
+            err: None,
+        });
+    }
 
     let task_id = id.clone();
-    let group_dir = dir.join(sanitize_name(&group));
+    let group_dir = dir.join(&group);
+    /* 元数据：播放页据此把 videoId:ep 映射到本地文件（断网直放）。追加写。 */
+    if let (Some(vid), Some(ep)) = (video_id, ep) {
+        let idx = group_dir.join("index.json");
+        let mut entries: Vec<serde_json::Value> = std::fs::read(&idx)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        entries.retain(|e| e.get("video_id") != Some(&serde_json::json!(vid)) || e.get("ep") != Some(&serde_json::json!(ep)));
+        entries.push(json!({ "video_id": vid, "ep": ep, "name": name }));
+        let _ = std::fs::create_dir_all(&group_dir);
+        let _ = serde_json::to_vec(&entries).map(|b| std::fs::write(&idx, b));
+    }
     let handle = tauri::async_runtime::spawn(async move {
         let emit_progress = |done: usize, total: usize| {
             task_update(&task_id, |t| { t.done = done; t.total = total; });
@@ -440,6 +475,24 @@ pub async fn download_start(
                 (false, None, Some(e))
             }
         };
+        /* 完成后把实际文件名回填进 index.json：start 时只知道「第N集」，unique_path
+           可能加了 (1) 后缀、扩展名也是按内容定的。按 name 匹配补 file 字段。 */
+        if let Some(p) = &path {
+            if let Some(file) = std::path::Path::new(p).file_name().and_then(|f| f.to_str()) {
+                let idx = group_dir.join("index.json");
+                let mut entries: Vec<serde_json::Value> = std::fs::read(&idx)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default();
+                let name_j = serde_json::json!(name);
+                for e in entries.iter_mut() {
+                    if e.get("name") == Some(&name_j) {
+                        e["file"] = json!(file);
+                    }
+                }
+                let _ = serde_json::to_vec(&entries).map(|b| std::fs::write(&idx, b));
+            }
+        }
         let info = task_get(&task_id);
         let _ = app.emit("hg-download-done", json!({
             "id": task_id,
@@ -523,6 +576,81 @@ fn file_mtime(meta: &std::fs::Metadata) -> u64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 供播放页查询：videoId+ep 是否已下载。命中返回「可播放的本地协议地址」
+/// （`<LOCAL>/file?u=<相对路径>`，由 media 协议路由直接读盘返回）。
+/// 只认 index.json 里带 file 字段的条目（即真正完成的集）。
+#[tauri::command]
+pub async fn download_check(app: tauri::AppHandle, video_id: i64, ep: i64) -> Result<Option<String>, String> {
+    let dir = download_dir(&app)?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取下载目录失败: {e}"))?;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let group = entry.file_name().to_string_lossy().to_string();
+        let idx = entry.path().join("index.json");
+        let Ok(bytes) = std::fs::read(&idx) else { continue };
+        let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else { continue };
+        for it in items {
+            if it.get("video_id").and_then(|v| v.as_i64()) == Some(video_id)
+                && it.get("ep").and_then(|v| v.as_i64()) == Some(ep)
+                && it.get("file").and_then(|f| f.as_str()).is_some_and(|f| !f.is_empty())
+            {
+                let file = it["file"].as_str().unwrap_or_default();
+                return Ok(Some(format!(
+                    "{}/file?u={}",
+                    crate::media::LOCAL_ORIGIN,
+                    utf8_percent_encode(&format!("{group}/{file}"), percent_encoding::NON_ALPHANUMERIC),
+                )));            }
+        }
+    }
+    Ok(None)
+}
+
+/// 下载库（磁盘）状态：按剧列出各集的完成情况。断网可用（纯本地读）。
+/// 供「我的-下载」页做数据源；内存任务表只用来叠显示进行中的任务。
+#[tauri::command]
+pub async fn download_library(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let dir = download_dir(&app)?;
+    let mut groups: Vec<serde_json::Value> = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取下载目录失败: {e}"))?;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let group = entry.file_name().to_string_lossy().to_string();
+        let Ok(subs) = std::fs::read_dir(entry.path()) else { continue };
+        let mut eps: Vec<serde_json::Value> = Vec::new();
+        for sub in subs.flatten() {
+            let Ok(m) = sub.metadata() else { continue };
+            if !m.is_file() { continue; }
+            let n = sub.file_name().to_string_lossy().to_string();
+            if n == "index.json" { continue; }
+            let ext = n.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let mime = match ext.as_str() {
+                "mp4" | "m4s" => "video/mp4",
+                "ts" => "video/mp2t",
+                _ => "application/octet-stream",
+            };
+            eps.push(json!({
+                "file": n,
+                "size": m.len(),
+                "mtime": file_mtime(&m),
+                "mime": mime,
+                "local_url": format!(
+                    "{}/file?u={}",
+                    crate::media::LOCAL_ORIGIN,
+                    utf8_percent_encode(&format!("{group}/{n}"), percent_encoding::NON_ALPHANUMERIC),
+                ),
+            }));
+        }
+        if !eps.is_empty() {
+            groups.push(json!({ "group": group, "episodes": eps }));
+        }
+    }
+    Ok(json!({ "groups": groups }))
 }
 
 /// 删除已下载文件（只允许下载目录内、剧子目录一层以内的相对路径）。

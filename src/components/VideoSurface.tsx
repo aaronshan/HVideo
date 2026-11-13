@@ -104,7 +104,9 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
 
     const proxied = isLocalMedia(src);
     const url = proxied ? src : playlist(src);
-    const useHls = !url.includes("/seg?u=");
+    /* /file（已下载本地文件）与 /seg（透传媒体）都是普通媒体，直接喂给 <video>；
+       只有 m3u8 走 hls.js。 */
+    const useHls = !url.includes("/seg?u=") && !url.includes("/file?u=");
     trace("source.load", { engine: useHls && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     /* 换源时先把音量/倍速套回去：hls 重新 attach 后浏览器会把它们重置成默认值 */

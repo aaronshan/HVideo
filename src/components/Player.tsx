@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { fmtTime, platform, playlist } from "../api";
+import { fmtTime, isLocalMedia, platform, playlist } from "../api";
 import { mediaErrorMessage } from "../mediaErrors";
 import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
@@ -64,12 +64,14 @@ export default function Player({
     setErrMsg("");
     setWaiting(false);
     recoverCountRef.current = 0;
-    const url = playlist(src);
-    trace("source.load", { engine: Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
+    /* 已是本地协议地址（/file 本地文件、/seg 透传）直接用；m3u8 才包代理 */
+    const url = isLocalMedia(src) ? src : playlist(src);
+    const isPlainMedia = url.includes("/file?u=") || url.includes("/seg?u=");
+    trace("source.load", { engine: !isPlainMedia && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    if (Hls.isSupported()) {
+    if (!isPlainMedia && Hls.isSupported()) {
       const hls = new Hls({
         // 禁用从插播/内容引导 JSON 派生直连 URL 的可选功能。
         interstitialsController: undefined,
