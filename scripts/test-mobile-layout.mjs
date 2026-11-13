@@ -24,22 +24,36 @@ try {
   browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || undefined });
   const context = await browser.newContext({ userAgent, isMobile: true, hasTouch: true, viewport: viewports[0] });
   await context.addInitScript(() => {
-    const fixture = { calls: [], unexpected: [] };
+    const fixture = { calls: [], unexpected: [], eventHandlers: {} };
     const emptyPage = { items: [], pagination: { page: 1, pages: 1, size: 8, total: 0 } };
     Object.assign(window, {
       mobileLayoutFixture: fixture,
-      __TAURI_INTERNALS__: { invoke(cmd, args = {}) {
-        fixture.calls.push({ cmd, args });
-        if (cmd === "app_boot") return Promise.resolve({ user: null, logged_in: false, base: "https://fixture.invalid", strict_security: true });
-        if (cmd === "playback_log_status") return Promise.resolve({ enabled: false, path: null, error: null });
-        if (cmd === "debug_log") return Promise.resolve();
-        if (cmd === "line_auto") return Promise.resolve({ base: "https://fixture.invalid", previous: "https://fixture.invalid", switched: false, pick: { tier: "main", ms: 1, reason: "fixture", candidates: [] } });
-        if (["api_feed", "api_category", "api_posts", "api_search_hot"].includes(cmd)) return Promise.resolve(emptyPage);
-        // App's development-only playback self-test must not fetch media upstream.
-        if (cmd === "api_play") return Promise.reject("Layout fixture has no playback media");
-        fixture.unexpected.push(cmd);
-        return Promise.reject(`Unexpected IPC: ${cmd}`);
-      } },
+      __TAURI_INTERNALS__: {
+        // @tauri-apps/api 的 listen() 用它注册回调（返回 id）
+        transformCallback(cb) {
+          const id = fixture.eventHandlers.nextId = (fixture.eventHandlers.nextId || 0) + 1;
+          fixture.eventHandlers[id] = cb;
+          return id;
+        },
+        invoke(cmd, args = {}) {
+          fixture.calls.push({ cmd, args });
+          if (cmd === "app_boot") return Promise.resolve({ user: null, logged_in: false, base: "https://fixture.invalid", strict_security: true });
+          if (cmd === "playback_log_status") return Promise.resolve({ enabled: false, path: null, error: null });
+          if (cmd === "debug_log") return Promise.resolve();
+          if (cmd === "line_auto") return Promise.resolve({ base: "https://fixture.invalid", previous: "https://fixture.invalid", switched: false, pick: { tier: "main", ms: 1, reason: "fixture", candidates: [] } });
+          if (["api_feed", "api_category", "api_posts", "api_search_hot"].includes(cmd)) return Promise.resolve(emptyPage);
+          // 事件监听：App 全局下载通知 + 下载管理面板都挂了 listen
+          if (cmd === "plugin:event|listen") return Promise.resolve(fixture.eventHandlers.nextId || 1);
+          if (cmd === "plugin:event|unlisten") return Promise.resolve();
+          // 下载库查询（「我的」页挂载即拉，纯本地读）：空库不打上游
+          if (cmd === "download_library") return Promise.resolve({ groups: [] });
+          if (cmd === "download_tasks") return Promise.resolve([]);
+          // App's development-only playback self-test must not fetch media upstream.
+          if (cmd === "api_play") return Promise.reject("Layout fixture has no playback media");
+          fixture.unexpected.push(cmd);
+          return Promise.reject(`Unexpected IPC: ${cmd}`);
+        },
+      },
     });
   });
   page = await context.newPage();
