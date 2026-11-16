@@ -181,7 +181,7 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
     if (!src) { toast(resolving ? "视频地址解析中…" : "该帖子没有视频", "info"); return; }
     const base = post?.title || `吃瓜-${id}`;
     const name = segs.length > 1 ? `${base} 第${seg + 1}段` : base;
-    api.downloadStart(src, name, base)
+    api.downloadStart(src, name, base, undefined, undefined, post?.cover || undefined)
       .then((tid) => { setDl({ id: tid, done: 0, total: 1 }); toast("已开始下载，可在 我的-下载 查看", "ok"); })
       .catch((e) => toast((e as Error).message || "下载失败", "info"));
   };

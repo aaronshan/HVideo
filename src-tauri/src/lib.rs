@@ -150,12 +150,19 @@ pub fn run() {
             let uri = request.uri().clone();
             let path = uri.path().to_string();
             let query = uri.query().unwrap_or("").to_string();
+            // 本地已下载文件按 Range 切片（MMS managed fetch / seek 依赖 206）
+            let range = request
+                .headers()
+                .get("Range")
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| v.len() <= 100 && v.bytes().all(|b| b.is_ascii_digit() || b"bytes=,- ".contains(&b)))
+                .map(str::to_string);
             // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
             // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
             let app = app.app_handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut resp = media::handle(Some(&app), &path, &query, media::LOCAL_ORIGIN).await;
+                let mut resp = media::handle(Some(&app), &path, &query, media::LOCAL_ORIGIN, range.as_deref()).await;
                 if let Some(origin) =
                     request_origin.and_then(|s| tauri::http::HeaderValue::from_str(&s).ok())
                 {

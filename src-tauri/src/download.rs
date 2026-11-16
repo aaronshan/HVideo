@@ -407,7 +407,8 @@ async fn download_segments(
 
 /// 启动后台下载，立即返回任务 id；进度/完成走事件。
 /// `group` 为剧名：文件落到 `HGhub/<剧名>/` 下；`name` 是完整展示名（含集数）。
-/// `video_id` / `ep` 写进剧目录的 index.json，播放页用它把「已下载」映射到本地文件。
+/// `video_id` / `ep` 写进剧目录的 index.json，播放页用它把「已下载」映射到本地文件；
+/// `cover_url` 是封面原始地址：下载解密后存为剧目录的 cover.jpg（下载列表离线显示用）。
 #[tauri::command]
 pub async fn download_start(
     app: tauri::AppHandle,
@@ -416,6 +417,7 @@ pub async fn download_start(
     group: Option<String>,
     video_id: Option<i64>,
     ep: Option<i64>,
+    cover_url: Option<String>,
 ) -> Result<String, String> {
     let dir = download_dir(&app)?;
     let group = group.unwrap_or_else(|| name.clone());
@@ -452,6 +454,17 @@ pub async fn download_start(
         let _ = serde_json::to_vec(&entries).map(|b| std::fs::write(&idx, b));
     }
     let handle = tauri::async_runtime::spawn(async move {
+        /* 封面落盘（一次）：下载列表断网也能显示缩略图。失败不阻断视频下载。 */
+        if let Some(cover) = cover_url.as_deref().filter(|c| !c.is_empty()) {
+            let cover_path = group_dir.join("cover.jpg");
+            if !cover_path.exists() {
+                if let Ok((kind, bytes)) = crate::media::load_image(cover).await {
+                    let ext = if kind == "image/png" { "png" } else { "jpg" };
+                    let _ = std::fs::create_dir_all(&group_dir);
+                    let _ = std::fs::write(group_dir.join(format!("cover.{ext}")), bytes.as_ref());
+                }
+            }
+        }
         let emit_progress = |done: usize, total: usize| {
             task_update(&task_id, |t| { t.done = done; t.total = total; });
             let _ = app.emit("hg-download-progress", json!({ "id": task_id, "done": done, "total": total }));
@@ -578,6 +591,28 @@ fn file_mtime(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// 本地播放地址：TS 合并文件浏览器原生播不了，加 wrap=hls 走合成 m3u8
+/// （hls.js / 原生 HLS remux）；fMP4 合并文件直接给 <video>。
+fn local_play_url(group: &str, file: &str) -> String {
+    let rel = format!("{group}/{file}");
+    let u = utf8_percent_encode(&rel, percent_encoding::NON_ALPHANUMERIC);
+    if file.to_ascii_lowercase().ends_with(".ts") {
+        format!("{}/file?u={}&wrap=hls", crate::media::LOCAL_ORIGIN, u)
+    } else {
+        format!("{}/file?u={}", crate::media::LOCAL_ORIGIN, u)
+    }
+}
+
+/// 组内静态资源（封面）地址。
+fn group_file_url(group: &str, file: &str) -> String {
+    let rel = format!("{group}/{file}");
+    format!(
+        "{}/file?u={}",
+        crate::media::LOCAL_ORIGIN,
+        utf8_percent_encode(&rel, percent_encoding::NON_ALPHANUMERIC),
+    )
+}
+
 /// 供播放页查询：videoId+ep 是否已下载。命中返回「可播放的本地协议地址」
 /// （`<LOCAL>/file?u=<相对路径>`，由 media 协议路由直接读盘返回）。
 /// 只认 index.json 里带 file 字段的条目（即真正完成的集）。
@@ -599,11 +634,8 @@ pub async fn download_check(app: tauri::AppHandle, video_id: i64, ep: i64) -> Re
                 && it.get("file").and_then(|f| f.as_str()).is_some_and(|f| !f.is_empty())
             {
                 let file = it["file"].as_str().unwrap_or_default();
-                return Ok(Some(format!(
-                    "{}/file?u={}",
-                    crate::media::LOCAL_ORIGIN,
-                    utf8_percent_encode(&format!("{group}/{file}"), percent_encoding::NON_ALPHANUMERIC),
-                )));            }
+                return Ok(Some(local_play_url(&group, file)));
+            }
         }
     }
     Ok(None)
@@ -639,15 +671,16 @@ pub async fn download_library(app: tauri::AppHandle) -> Result<serde_json::Value
                 "size": m.len(),
                 "mtime": file_mtime(&m),
                 "mime": mime,
-                "local_url": format!(
-                    "{}/file?u={}",
-                    crate::media::LOCAL_ORIGIN,
-                    utf8_percent_encode(&format!("{group}/{n}"), percent_encoding::NON_ALPHANUMERIC),
-                ),
+                "local_url": local_play_url(&group, &n),
             }));
         }
         if !eps.is_empty() {
-            groups.push(json!({ "group": group, "episodes": eps }));
+            /* 组封面：下载时落盘的 cover.jpg/png（旧下载可能没有） */
+            let cover = ["cover.jpg", "cover.png"]
+                .into_iter()
+                .find(|c| entry.path().join(c).is_file())
+                .map(|c| group_file_url(&group, c));
+            groups.push(json!({ "group": group, "cover": cover, "episodes": eps }));
         }
     }
     Ok(json!({ "groups": groups }))
@@ -689,6 +722,17 @@ pub async fn download_delete_group(app: tauri::AppHandle, name: String) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_play_url_wraps_ts_but_not_mp4() {
+        // TS 合并文件 → 合成 m3u8（hls.js remux）；fMP4 合并文件 → 直连
+        assert!(local_play_url("我的剧", "第1集.ts").ends_with("&wrap=hls"));
+        let mp4 = local_play_url("我的剧", "第1集.mp4");
+        assert!(mp4.starts_with(&format!("{}/file?u=", crate::media::LOCAL_ORIGIN)));
+        assert!(!mp4.contains("wrap"));
+        // 相对路径经 percent-encode，剧名/文件名不会破坏 URL 结构
+        assert!(local_play_url("我的 剧/二", "第 1 集.ts").starts_with(&format!("{}/file?u=", crate::media::LOCAL_ORIGIN)));
+    }
 
     #[test]
     fn master_picks_highest_bandwidth_variant() {

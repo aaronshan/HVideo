@@ -198,9 +198,10 @@ export const api = {
   openUrl: (url: string) => call<void>("open_url", { url }),
   /** 启动后台下载，立即返回任务 id；进度/完成走 hg-download-progress / hg-download-done 事件。
    *  group = 剧名：文件落到 下载目录/HGhub/<剧名>/ 下。
-   *  videoId/ep 写进该剧 index.json，播放页据此直接放本地文件 */
-  downloadStart: (url: string, name: string, group?: string, videoId?: number, ep?: number) =>
-    call<string>("download_start", { url, name, group: group ?? null, videoId: videoId ?? null, ep: ep ?? null }),
+   *  videoId/ep 写进该剧 index.json，播放页据此直接放本地文件；
+   *  coverUrl 落盘为剧目录封面（下载列表离线显示） */
+  downloadStart: (url: string, name: string, group?: string, videoId?: number, ep?: number, coverUrl?: string) =>
+    call<string>("download_start", { url, name, group: group ?? null, videoId: videoId ?? null, ep: ep ?? null, coverUrl: coverUrl ?? null }),
   downloadCancel: (id: string) => call<void>("download_cancel", { id }),
   downloadTasks: () => call<DownloadTask[]>("download_tasks"),
   downloadFiles: () => call<DownloadFile[]>("download_files"),

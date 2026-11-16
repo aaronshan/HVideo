@@ -221,40 +221,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     return () => { un1.then((f) => f()).catch(() => {}); un2.then((f) => f()).catch(() => {}); };
   }, []);
 
-  /* 下载整部剧：顺序为每一集建任务（Rust 侧逐个排队执行），进度 = 完成集数/总集数 */
-  const downloadAllEpisodes = async () => {
-    if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
-    if (kind !== "video" || episodes.length === 0) return;
-    const base = meta.title || `视频-${curId}`;
-    let started = 0;
-    /* 取地址：先用已缓存的（预热），没有的现场取 */
-    for (const ep of episodes) {
-      const k = `${curId}:${ep.ep_num}`;
-      let u = playUrls[k] || "";
-      if (!u) {
-        try {
-          const info = await api.play(curId, ep.ep_num);
-          u = info?.streams?.main || info?.video_url || "";
-          if (u) setPlayUrls((m) => ({ ...m, [k]: u }));
-        } catch { /* 单集取失败：跳过 */ }
-      }
-      if (!u) continue;
-      try {
-        await api.downloadStart(u, `${base} 第${ep.ep_num}集`, base, curId, ep.ep_num);
-        started += 1;
-      } catch { /* 单集失败不阻断其它集 */ }
-    }
-    if (started > 0) toast(`已开始下载《${base}》${started} 集，在 我的-下载 查看`, "ok");
-    else toast("没有可下载的集", "info");
-  };
-
+  /* 下载：只下当前这一集（想下别的集，切到那一集再点） */
   const onDownload = () => {
     if (dl) { toast(`正在下载 ${dl.done}/${dl.total}`, "info"); return; }
     if (!playUrl) { toast("播放地址还没就绪，稍候再试", "info"); return; }
     const base = meta.title || (kind === "post" ? `吃瓜-${curId}` : `视频-${curId}`);
-    /* 多集剧点按钮 = 下载整部剧；单集/吃瓜 = 只下当前内容 */
-    if (kind === "video" && episodes.length > 1) { void downloadAllEpisodes(); return; }
-    api.downloadStart(playUrl, base, base, kind === "video" ? curId : undefined, kind === "video" ? curEp : undefined)
+    const name = kind === "video" && episodes.length > 1 ? `${base} 第${curEp}集` : base;
+    const isVideo = kind === "video";
+    api.downloadStart(playUrl, name, base, isVideo ? curId : undefined, isVideo ? curEp : undefined, meta.cover || undefined)
       .then((id) => { setDl({ id, done: 0, total: 1 }); toast("已开始下载，可在 我的-下载 查看", "ok"); })
       .catch((e) => toast((e as Error).message || "下载失败", "info"));
   };

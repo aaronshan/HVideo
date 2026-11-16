@@ -64,9 +64,10 @@ export default function Player({
     setErrMsg("");
     setWaiting(false);
     recoverCountRef.current = 0;
-    /* 已是本地协议地址（/file 本地文件、/seg 透传）直接用；m3u8 才包代理 */
+    /* 已是本地协议地址（/file 本地文件、/seg 透传）直接用；m3u8 才包代理。
+       wrap=hls 的 /file 是 TS 合并文件的合成 m3u8，必须走 hls.js/原生 HLS remux。 */
     const url = isLocalMedia(src) ? src : playlist(src);
-    const isPlainMedia = url.includes("/file?u=") || url.includes("/seg?u=");
+    const isPlainMedia = url.includes("/seg?u=") || (url.includes("/file?u=") && !url.includes("wrap=hls"));
     trace("source.load", { engine: !isPlainMedia && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }

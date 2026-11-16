@@ -311,26 +311,51 @@ pub fn clear_caches() {
 
 /* ───────────────────────── 协议响应 ───────────────────────── */
 
-/// 读本地已下载文件（`HGhub/<剧名>/<文件>`）。只放行下载目录内的相对路径，
-/// 并按扩展名给 MIME。读整包返回——播放器 seek 时 WebView 会带 Range 重来。
-pub fn load_local_file(app: Option<&tauri::AppHandle>, rel: &str) -> Response<Vec<u8>> {
-    let bad = respond(400, "text/plain", b"bad path".to_vec(), "no-store");
-    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') || rel.is_empty() {
-        return bad;
+/// 解析 `Range: bytes=a-b` 请求头 → (start, end_inclusive)。仅支持单区间；
+/// 非法/不支持的形式返回 None（按整包 200 处理）。
+fn parse_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    let (start_s, end_s) = spec.split_once('-')?;
+    let start: u64 = start_s.trim().parse().ok()?;
+    if start >= total {
+        return None;
     }
-    let Some(app) = app else { return bad };
-    let dir = match crate::download::download_root(app) {
-        Ok(d) => d,
-        Err(e) => return respond(500, "text/plain", e.into_bytes(), "no-store"),
+    let end = match end_s.trim() {
+        "" => total - 1,
+        s => s.parse::<u64>().ok()?.min(total - 1),
     };
-    let path = dir.join(rel);
-    // 规范化后必须还在下载目录里（防符号链接越界）
-    let canonical = match std::fs::canonicalize(&path) {
-        Ok(c) => c,
-        Err(_) => return respond(404, "text/plain", b"not found".to_vec(), "no-store"),
-    };
+    if end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn respond_partial(ctype: &str, bytes: Vec<u8>, start: u64, total: u64) -> Response<Vec<u8>> {
+    let len = bytes.len().to_string();
+    let range = format!("bytes {start}-{}/{total}", start + bytes.len() as u64 - 1);
+    Response::builder()
+        .status(StatusCode::from_u16(206).unwrap_or(StatusCode::OK))
+        .header("Content-Type", ctype)
+        .header("Content-Length", len)
+        .header("Content-Range", range)
+        .header("Accept-Ranges", "bytes")
+        .header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Accept-Ranges, Content-Range")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "public, max-age=86400")
+        .body(bytes)
+        .unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+/// 定位下载目录内的本地文件（路径校验），返回 (绝对路径, MIME)。
+/// `rel` 必须是下载目录内的相对路径。
+pub fn resolve_local_file(app: &tauri::AppHandle, rel: &str) -> Result<(std::path::PathBuf, &'static str), String> {
+    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') || rel.is_empty() {
+        return Err("非法文件名".into());
+    }
+    let dir = crate::download::download_root(app)?;
+    let canonical = std::fs::canonicalize(dir.join(rel)).map_err(|_| "文件不存在".to_string())?;
     if !canonical.starts_with(&dir) || !canonical.is_file() {
-        return respond(404, "text/plain", b"not found".to_vec(), "no-store");
+        return Err("文件不存在".into());
     }
     let ext = canonical
         .extension()
@@ -344,10 +369,53 @@ pub fn load_local_file(app: Option<&tauri::AppHandle>, rel: &str) -> Response<Ve
         "png" => "image/png",
         _ => "application/octet-stream",
     };
-    match std::fs::read(&canonical) {
-        Ok(bytes) => respond(200, ctype, bytes, "public, max-age=86400"),
-        Err(e) => respond(500, "text/plain", e.to_string().into_bytes(), "no-store"),
+    Ok((canonical, ctype))
+}
+
+/// 读本地已下载文件（`HGhub/<剧名>/<文件>`）。
+/// TS 合并文件浏览器原生播不了（MPEG-TS 不是 <video> 支持的封装），`wrap=hls`
+/// 时合成一个指向自身的单分片 m3u8，交给 hls.js / 原生 HLS remux 播放。
+/// Range 请求返回 206 切片（MMS 的 managed fetch 与 seek 都依赖它）。
+pub fn load_local_file(app: Option<&tauri::AppHandle>, rel: &str, wrap_hls: bool, range: Option<&str>) -> Response<Vec<u8>> {
+    let bad = respond(400, "text/plain", b"bad path".to_vec(), "no-store");
+    let Some(app) = app else { return bad };
+    let (path, ctype) = match resolve_local_file(app, rel) {
+        Ok(v) => v,
+        Err(e) => return respond(404, "text/plain", e.into_bytes(), "no-store"),
+    };
+    if wrap_hls {
+        /* 只验存在性；时长未知——EXTINF 给大值，播放器以实际流为准（VOD 声明可 seek） */
+        let body = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:3600\n#EXTINF:3600.0,\nfile?u={}\n#EXT-X-ENDLIST\n",
+            utf8_percent_encode(rel, NON_ALPHANUMERIC),
+        );
+        return respond(200, "application/vnd.apple.mpegurl", body.into_bytes(), "no-store");
     }
+    let total = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) => return respond(500, "text/plain", e.to_string().into_bytes(), "no-store"),
+    };
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => return respond(500, "text/plain", e.to_string().into_bytes(), "no-store"),
+    };
+    use std::io::Read;
+    if let Some((start, end)) = range.and_then(|r| parse_range(r, total)) {
+        let len = (end - start + 1) as usize;
+        let mut buf = vec![0u8; len];
+        if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).is_err() {
+            return respond(500, "text/plain", b"seek failed".to_vec(), "no-store");
+        }
+        if file.read_exact(&mut buf).is_err() {
+            return respond(500, "text/plain", b"read failed".to_vec(), "no-store");
+        }
+        return respond_partial(ctype, buf, start, total);
+    }
+    let mut buf = Vec::with_capacity(total.min(64 * 1024 * 1024) as usize);
+    if file.read_to_end(&mut buf).is_err() {
+        return respond(500, "text/plain", b"read failed".to_vec(), "no-store");
+    }
+    respond(200, ctype, buf, "public, max-age=86400")
 }
 
 fn respond(status: u16, ctype: &str, body: Vec<u8>, cache: &str) -> Response<Vec<u8>> {
@@ -400,12 +468,13 @@ fn segment_response(
     )
 }
 
-/// 统一入口：`<LOCAL_ORIGIN>/img?u=` / `hls?u=` / `seg?u=` / `file?u=<下载目录相对路径>`
+/// 统一入口：`<LOCAL_ORIGIN>/img?u=` / `hls?u=` / `seg?u=` / `file?u=<下载目录相对路径>[&wrap=hls]`
 ///
 /// `origin` 是本平台自定义协议的完整基址，见 [`LOCAL_ORIGIN`]；用于改写 m3u8 里的
 /// 分片与 key 地址。正常情况下调用方直接传 [`LOCAL_ORIGIN`]。
-/// `/file` 是纯本地路由（读已下载文件），`app` 为 None 时返回 400。
-pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, origin: &str) -> Response<Vec<u8>> {
+/// `/file` 是纯本地路由（读已下载文件），`app` 为 None 时返回 400；
+/// `range` 是原始 `Range` 请求头（206 切片用）。
+pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, origin: &str, range: Option<&str>) -> Response<Vec<u8>> {
     /* 本地文件路由不走 u= 的 URL 语义，单独解析 */
     if path == "/file" {
         let rel = query
@@ -413,6 +482,7 @@ pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, ori
             .find_map(|kv| kv.strip_prefix("u="))
             .map(dec)
             .unwrap_or_default();
+        let wrap_hls = query.split('&').any(|kv| kv == "wrap=hls");
         if rel.is_empty() {
             return respond(400, "text/plain", b"missing u".to_vec(), "no-store");
         }
@@ -420,7 +490,7 @@ pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, ori
             "proxy.begin",
             serde_json::json!({"route": "local_file", "resource": crate::playback_log::resource_id(&rel)}),
         );
-        let response = load_local_file(app, &rel);
+        let response = load_local_file(app, &rel, wrap_hls, range);
         crate::playback_log::record(
             "proxy.end",
             serde_json::json!({"route": "local_file", "resource": crate::playback_log::resource_id(&rel), "status": response.status().as_u16(), "bytes": response.body().len()}),
@@ -481,6 +551,30 @@ pub async fn handle(app: Option<&tauri::AppHandle>, path: &str, query: &str, ori
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_header_parses_single_span() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+        // 尾开区间：到文件末尾
+        assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+        // end 越界取文件末尾
+        assert_eq!(parse_range("bytes=900-2000", 1000), Some((900, 999)));
+        // start 越界 / 语法错 → 整包
+        assert_eq!(parse_range("bytes=1000-", 1000), None);
+        assert_eq!(parse_range("bytes=5-2", 1000), None);
+        assert_eq!(parse_range("chars=0-1", 1000), None);
+        assert_eq!(parse_range("bytes=a-b", 1000), None);
+    }
+
+    #[test]
+    fn range_partial_response_headers() {
+        /* 调用方传切好的片段：文件 [2,10) 共 8 字节 */
+        let body = b"23456789".to_vec();
+        let r = respond_partial("video/mp2t", body, 2, 10);
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["Content-Range"], "bytes 2-9/10");
+        assert_eq!(r.headers()["Content-Length"], "8");
+    }
 
     #[test]
     fn dateranges_keep_timing_and_scte_metadata_but_drop_external_resources() {
@@ -565,7 +659,7 @@ mod tests {
             &text[..text.len().min(160)]
         );
         let q = format!("u={}", enc(&url));
-        let resp = handle(None, "/hls", &q, LOCAL_ORIGIN).await;
+        let resp = handle(None, "/hls", &q, LOCAL_ORIGIN, None).await;
         let body = String::from_utf8_lossy(resp.body()).to_string();
         println!("proxied status={} len={}", resp.status(), body.len());
         assert!(body.contains("#EXTM3U"));
@@ -577,7 +671,7 @@ mod tests {
             .to_string();
         println!("seg line: {}", &seg_line[..seg_line.len().min(120)]);
         let seg_q = seg_line.split("?u=").nth(1).unwrap();
-        let seg = handle(None, "/seg", &format!("u={seg_q}"), LOCAL_ORIGIN).await;
+        let seg = handle(None, "/seg", &format!("u={seg_q}"), LOCAL_ORIGIN, None).await;
         println!("segment status={} len={}", seg.status(), seg.body().len());
         assert_eq!(seg.status(), 200);
         assert!(seg.body().len() > 1000);
